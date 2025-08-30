@@ -44,7 +44,6 @@ androidComponents.onVariants { variant ->
         group = "module"
         dependsOn(":loader:assemble$variantCapped", ":zygiskd:buildAndStrip")
 
-        // Consolidate all file copying logic into one block
         into(moduleDir) {
             from("${rootProject.projectDir}/README.md")
             from("$projectDir/src") {
@@ -95,7 +94,7 @@ androidComponents.onVariants { variant ->
             val privateKeyFile = file("private_key")
             
             if (privateKeyFile.exists()) {
-                logger.lifecycle("=== 开始签名模块文件 ===")
+                logger.lifecycle("=== Starting module signing ===")
 
                 val privateKey = privateKeyFile.readBytes()
                 val publicKey = file("public_key").readBytes()
@@ -139,7 +138,7 @@ androidComponents.onVariants { variant ->
                     val signFile = root.resolve(name)
                     signFile.writeBytes(sig.sign())
                     signFile.appendBytes(publicKey)
-                    logger.lifecycle("生成签名文件: $name")
+                    logger.lifecycle("Generated signature file: $name")
                 }
 
                 // Generate SHA256 hashes for all files
@@ -152,7 +151,7 @@ androidComponents.onVariants { variant ->
                         }
                         file.resolveSibling("${file.name}.sha256").writeText(Hex.encodeHexString(md.digest()))
                     }
-                    logger.lifecycle("已为所有文件生成SHA256哈希")
+                    logger.lifecycle("Generated SHA256 hashes for all files")
                 }
 
                 // Generate all necessary signatures
@@ -166,4 +165,52 @@ androidComponents.onVariants { variant ->
                 // Master signature
                 sig.initSign(privKey)
                 root.walkTopDown().forEach { file ->
-                    if (!file.isFile || file
+                    if (!file.isFile || file.isHidden) return@forEach
+                    file.sha(file)
+                }
+
+                val misakiSignatureFile = root.resolve("misaki.sig")
+                misakiSignatureFile.writeBytes(sig.sign())
+                misakiSignatureFile.appendBytes(publicKey)
+                logger.lifecycle("Generated master signature file: misaki.sig")
+                
+            } else {
+                logger.warn("No private_key found, this build will not be signed")
+                
+                // Create empty signature files
+                listOf("machikado.arm64", "machikado.arm", "machikado.x86_64", "machikado.x86", "misaki.sig")
+                    .map { root.resolve(it) }
+                    .forEach { it.createNewFile() }
+                
+                // Generate SHA256 hashes for all files
+                root.walkTopDown().forEach { file ->
+                    if (!file.isFile || file.isHidden) return@forEach
+                    val md = MessageDigest.getInstance("SHA-256")
+                    file.forEachBlock(4096) { bytes, size ->
+                        md.update(bytes, 0, size)
+                    }
+                    file.resolveSibling("${file.name}.sha256").writeText(Hex.encodeHexString(md.digest()))
+                }
+                logger.lifecycle("Generated SHA256 hashes for all files (no signatures)")
+            }
+        }
+    }
+
+    val zipTask = task<Zip>("zip$variantCapped") {
+        group = "module"
+        dependsOn(signModuleTask)
+        archiveFileName.set(zipFileName)
+        destinationDirectory.set(layout.buildDirectory.dir("outputs/release").get().asFile)
+        from(moduleDir)
+    }
+
+    // Create push and install tasks
+    fun createInstallTask(name: String, variant: String, command: String): TaskProvider<Task> {
+        return tasks.register("${name}$variant") {
+            group = "module"
+            dependsOn(zipTask)
+            doLast {
+                val zipFile = zipTask.outputs.files.singleFile
+                exec {
+                    commandLine("adb", "push", zipFile.path, "/data/local/tmp")
+                }
